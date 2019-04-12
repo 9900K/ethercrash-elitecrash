@@ -1,0 +1,1398 @@
+// MartinG Bonus Bot
+
+var realBets = true;
+var enableChatBot = false;
+var goal = 1000000*100;
+var bet = 2500*100;
+
+var minTimeout = 130;
+var midTimeout = 170;
+var maxTimeout = 206;
+var minGameBeta = .020;
+var minCashoutGameBeta = .025;
+
+var megaBonusBet = 20000*100;
+
+var megaBonusMaxTimeout = 170;
+
+var megaGameBeta = .04;
+var megaEstimatedGameBeta = .045;
+
+var placeBetDelay = 800;
+
+
+var cashoutQuantile = .75;
+
+var bestCashoutCacheLength = 48;
+
+var betPercentOfGame = .2;
+var statsLength = 50;
+
+var whalePercentileBelow = .40;
+
+var betAverageLength = 5;
+var minGameCount = 5;
+
+var minAvgWhaleBet = 500*100;
+var currentBet;
+
+//
+//
+//
+//
+
+var USERNAME = 'u';
+var GAME_ID = 'g';
+var BET = 'b';
+var CRASH = 'h';
+var BONUS = 's';
+var CASHOUT = 't';
+
+//
+//
+//
+//
+
+var stats = {};
+var imPlaying = false;
+var imCachedOut = false;
+var gameCount = 0;
+var currentGameData = null;
+var currentGameId = null;
+var currentGameBeta = 0;
+var currentGameBonus = 0;
+var outstandingBonus = 0;
+var myPotentialBonus = 0;
+var estimatedGameValue = 0;
+var estimatedBonusPercent = 0;
+var estimatedLargestBet = 100;
+var estimatedGameBeta = 0;
+var bonusGameGrande = false;
+
+var whales = {};
+
+function cacheStats(onResult, onError) {
+
+    var playerNames = [];
+
+    for (var playerName in currentGameData) {
+        if (currentGameData.hasOwnProperty(playerName)) {
+            playerNames.push(playerName);
+        }
+    }
+
+    nextPlayer(0);
+
+    function nextPlayer(index) {
+        if(index >= playerNames.length) {
+            //printStats();
+            if(onResult) onResult();
+            return;
+        }
+
+        getRecords(onGetRecordsResult, onGetRecordsError, playerNames[index], statsLength);
+
+        function onGetRecordsResult(result) {
+            stats[playerNames[index]] = result;
+            nextPlayer(index + 1);
+        }
+
+        function onGetRecordsError() {
+            nextPlayer(index + 1);
+        }
+    }
+};
+
+function cacheBotsAndWhales() {
+
+	whales = {};
+
+    for (var playerName in currentGameData) {
+        if (currentGameData.hasOwnProperty(playerName)) {
+
+            if(_isWhale(playerName)) {
+                whales[playerName] = true;
+            }
+        }
+    }
+
+    //console.log('whales', whales);
+};
+
+
+function isWhale(playerName) {
+    return whales[playerName] == true;
+};
+
+
+function getAverageBonus(gameData) {
+    var totalBonus = 0;
+    var playerCount = 0;
+
+    for (var playerName in stats) {
+        if (gameData.hasOwnProperty(playerName) && stats.hasOwnProperty(playerName)) {
+            totalBonus += getAveragePlayerBonus(playerName);
+            playerCount++;
+        }
+    }
+
+    return totalBonus/playerCount;
+};
+
+
+function getAveragePlayerBonus(playerName) {
+    var playerStats = stats[playerName];
+    if(!playerStats || playerStats.length < 5) return 0;
+
+    return _getAveragePlayerBonus(playerStats);
+};
+
+function _getAveragePlayerBonus(playerStats) {
+    var sumBonus = 0;
+    var sumBet = 0;
+
+    if(!playerStats || playerStats.length == 0) return 0;
+
+    for(var i=0; i<playerStats.length; i++) {
+        sumBonus += (isNaN(playerStats[i][BONUS]) ? 0 : playerStats[i][BONUS]);
+        sumBet += (isNaN(playerStats[i][BET]) ? 0 : playerStats[i][BET]);
+    }
+
+    var b = sumBonus/sumBet;
+    if(isNaN(b)) b = 0;
+
+    return b;
+};
+
+function getWeightedPlayerCashout(playerName, minCrash, minBet) {
+    var playerStats = stats[playerName];
+	//console.log(stats[playerName]);
+    if(!playerStats || playerStats.length == 0) return 0;
+
+    return _getWeightedPlayerCashout(playerStats, minCrash, minBet);
+};
+
+function _getWeightedPlayerCashout(playerStats, minCrash, minBet) {
+    if(isNaN(parseInt(minCrash))) minCrash = 0;
+    if(isNaN(parseInt(minBet))) minBet = 0;
+
+    var cashouts = [];
+
+    for(var i=0, c=0; i<playerStats.length; i++) {
+        if(isNaN(playerStats[i][BET]) || playerStats[i][BET] < minBet) continue;
+        if(!isNaN(playerStats[i][CASHOUT]) ) {
+            cashouts.push(playerStats[i][CASHOUT]);
+            c++;
+        } else if (!isNaN(playerStats[i][CRASH]) && playerStats[i][CRASH] >= minCrash) {
+            cashouts.push(playerStats[i][CRASH]);
+            c++;
+        }
+    }
+
+    if(cashouts.length < 5) return 0;
+
+	var weightedCashout = 0;
+	
+	weightedCashout += cashouts[0] * 35/100;
+	weightedCashout += cashouts[1] * 25/100;
+	weightedCashout += cashouts[2] * 20/100;
+	weightedCashout += cashouts[3] * 10/100;
+	weightedCashout += cashouts[4] * 10/100;
+
+    return weightedCashout;
+};
+
+function getMedianPlayerCashout(playerName, minCrash, minBet, cashoutCount, percentile) {
+    var playerStats = stats[playerName];
+    if(!playerStats || playerStats.length == 0) return 0;
+
+    return _getMedianPlayerCashout(playerStats, minCrash, minBet, cashoutCount, percentile);
+};
+
+function _getMedianPlayerCashout(playerStats, minCrash, minBet, cashoutCount, percentile) {
+    if(isNaN(parseInt(minCrash))) minCrash = 0;
+    if(isNaN(parseInt(minBet))) minBet = 0;
+
+    var cashouts = [];
+
+    for(var i=0, c=0; i<playerStats.length && c < cashoutCount; i++) {
+        if(isNaN(playerStats[i][BET]) || playerStats[i][BET] < minBet) continue;
+        if(!isNaN(playerStats[i][CASHOUT]) ) {
+            cashouts.push(playerStats[i][CASHOUT]);
+            c++;
+        } else if (!isNaN(playerStats[i][CRASH]) && playerStats[i][CRASH] >= minCrash) {
+            cashouts.push(playerStats[i][CRASH]);
+            c++;
+        }
+    }
+
+    if(cashouts.length == 0) return 0;
+
+    cashouts.sort(sortFloat);
+
+    return cashouts[Math.floor(cashouts.length * percentile)];
+};
+
+function getAveragePlayerCashout(playerName, minBet) {
+    var playerStats = stats[playerName];
+    if(!playerStats || playerStats.length < 5) return 0;
+
+    return _getAveragePlayerCashout(playerStats, minBet);
+};
+
+function _getAveragePlayerCashout(playerStats, minBet) {
+    if(isNaN(parseInt(minBet))) minBet = 0;
+    var sumCashout = 0;
+    var cashoutCount = 0;
+
+    for(var i=0; i<playerStats.length; i++) {
+        if(!isNaN(playerStats[i][CASHOUT]) && (!minBet || (!isNaN(playerStats[i][BET]) && playerStats[i][BET] >= minBet))) {
+            sumCashout += playerStats[i][CASHOUT];
+            cashoutCount++;
+        }
+    }
+
+    var b = sumCashout/cashoutCount;
+
+    return b;
+};
+
+function getAveragePlayerBet(playerName, gameCount) {
+    var playerStats = stats[playerName];
+    if(!playerStats || playerStats.length < gameCount) return 0;
+
+    return _getAveragePlayerBet(playerStats, gameCount);
+};
+
+function _getAveragePlayerBet(playerStats, gameCount) {
+    if(isNaN(parseInt(gameCount))) gameCount = playerStats.length;
+    var sumBet = 0;
+    var betCount = 0;
+
+    for(var i=0; i<playerStats.length && i<gameCount; i++) {
+        sumBet += (isNaN(playerStats[i][BET]) ? 0 : playerStats[i][BET]);
+        betCount++;
+    }
+
+    var b = sumBet/betCount;
+
+    return b;
+};
+
+
+
+function getMedianPlayerBet(playerName, gameCount, percentile) {
+    var playerStats = stats[playerName];
+    if(!playerStats || playerStats.length < minGameCount) {
+		return 0;
+	}
+
+    return _getMedianPlayerBet(playerStats, gameCount, percentile);
+};
+
+function _getMedianPlayerBet(playerStats, gameCount, percentile) {
+    if(isNaN(parseInt(gameCount))) gameCount = playerStats.length;
+
+    var bets = [];
+
+
+    for(var i=0; i<playerStats.length && i<gameCount; i++) {
+		
+		var bet = playerStats[i][BET];
+		
+		if(isNaN(bet)) {
+			continue;
+		}
+
+        bets.push(bet);
+    }
+
+    bets.sort(sortFloat);
+
+    return bets[Math.floor(bets.length * percentile)];
+};
+
+
+function getMedianPlayerBetBetween(playerName, gameCount, percentile, min, max) {
+    var playerStats = stats[playerName];
+    if(!playerStats || playerStats.length < minGameCount) return 0;
+
+    return _getMedianPlayerBetBetween(playerStats, gameCount, percentile, min, max);
+};
+
+function _getMedianPlayerBetBetween(playerStats, gameCount, percentile, min, max) {
+    if(isNaN(parseInt(gameCount))) gameCount = playerStats.length;
+
+    var bets = [];
+
+    for(var i=0; i<playerStats.length && i<gameCount; i++) {
+		var bet = playerStats[i][BET];
+		
+		if(isNaN(bet) || bet < min || bet > max) {
+			continue;
+		}
+		
+        bets.push(bet);
+    }
+
+	if(bets.length == 0) return 0;
+	
+    bets.sort(sortFloat);
+
+    return bets[Math.floor(bets.length * percentile)];
+};
+
+
+function _isWhale(playerName) {
+    var medianCashout = getWeightedPlayerCashout(playerName, currentAutoCashout, minAvgWhaleBet);
+    return medianCashout >= currentAutoCashout;
+};
+
+var TP = 0;
+var TN = 0;
+var FP = 0;
+var FN = 0;
+var GAME_COUNT = 0;
+
+function setCurrentGameBeta() {
+    var bets = 0;
+    var bonus = 0;
+    var highestBet = 0;
+
+    for (var playerName in currentGameData) {
+        if (currentGameData.hasOwnProperty(playerName)) {
+            var playerBet = currentGameData[playerName].bet;
+            bets += playerBet;
+            if (playerBet > highestBet) highestBet = playerBet;
+        }
+    }
+
+    bonus = bets / 100;
+
+    currentGameBonus = bonus;
+    currentGameBeta = bonus / highestBet;
+
+	
+	var result = "";
+	
+	GAME_COUNT++;
+	
+	if(currentGameBeta >= minGameBeta && estimatedGameBeta >= minGameBeta) {
+		TP++;
+		result = "True Positive";
+	} else if (currentGameBeta >= minGameBeta && estimatedGameBeta < minGameBeta) {
+		FN++;
+		result = "False Negative";
+	} else if (currentGameBeta < minGameBeta && estimatedGameBeta >= minGameBeta) {
+		FP++;
+		result = "False Positive";
+	} else if (currentGameBeta < minGameBeta && estimatedGameBeta < minGameBeta) {
+		TN++;
+		result = "True Negative";
+	}
+	
+	console.log(result + tabs(result,5) + Math.round(estimatedGameBeta*10000)/100 + "%" + tabs(Math.round(estimatedGameBeta*10000)/100 + "%",3) + (Math.round(currentGameBeta*10000)/100) + "%" );
+	console.log(GAME_COUNT, Math.round(TP/GAME_COUNT*10000)/100, Math.round(TN/GAME_COUNT*10000)/100, Math.round(FP/GAME_COUNT*10000)/100, Math.round(FN/GAME_COUNT*10000)/100);
+	
+    if (currentGameData.hasOwnProperty(engine.getUsername())) {
+        myPotentialBonus = currentGameData[engine.getUsername()].bet * currentGameBeta;
+    }
+};
+
+
+
+var fullOutstandingBonus = 0;
+
+function updateOutstandingBonus() {
+    outstandingBonus = 0;
+    fullOutstandingBonus = 0;
+
+    for (var playerName in currentGameData) {
+        if (currentGameData.hasOwnProperty(playerName) && isNaN(currentGameData[playerName].stopped_at)) {
+            if(isWhale(playerName) || engine.getUsername() == playerName) continue;
+            fullOutstandingBonus += currentGameData[playerName].bet * currentGameBeta;
+            //fullOutstandingBonus = outstandingBonus;
+
+            if(outstandingBonus <= currentGameBonus) {
+                outstandingBonus = fullOutstandingBonus;
+            }
+        }
+    }
+};
+
+
+///////////////////////////////////////
+//
+// Game Starting
+//
+///////////////////////////////////////
+
+engine.on('game_starting', function(info) {
+    setTimeout(calcBet, info.time_till_start - placeBetDelay);
+	
+    //console.log('');
+    //console.log('== This is game ' + gameCount + ' ==');
+
+    if(!db) openDatabase();
+    currentGameId = info.game_id;
+
+    gameCount++;
+    imCachedOut = false;
+    imPlaying = false;
+    estimatedGameValue = 0;
+    estimatedLargestBet = 100;
+	//console.log(preGamePlayers);
+	bonusGameGrande = false;
+	preGamePlayers = [];
+	estimatedLargestBetter = null;
+    estimatedBonusPercent = 0;
+
+    estimatedGameBeta = 0;
+    autoCashoutTimer = null;
+	earlyBetters = {};
+	//currentLateComers = [];
+	
+	if(engine.getBalance() >= goal) {
+		console.log("Goal Reached")
+		return;
+	}
+});
+
+var autoCashoutTimer;
+var currentAutoCashout;
+
+var setAutoCashout = function() {
+   // console.log("Setting onAutoCashout");
+
+	var at = currentGameBeta <= minCashoutGameBeta ? minTimeout : maxTimeout;
+	
+	/*if(currentGameBeta >= megaGameBeta) {
+		console.log("high beta");
+		at =  megaBonusMaxTimeout;
+	} else  if (bestCashoutsSorted.length >= 10) {
+
+		if (currentGameBeta < minGameBeta) 
+		{
+			console.log("low beta");
+			at =  getBestCashoutAtQuantile(cashoutQuantile - .35);
+		} else {
+			console.log("medium beta");
+			at =  getBestCashoutAtQuantile(cashoutQuantile);
+		}
+		
+    } else {
+        at = minTimeout;
+    }
+	
+	if(at > currentTimeout) at = currentTimeout;
+
+	
+	console.log("Setting Auto Cashout At", at);
+	
+    if(autoCashoutTimer != null && currentAutoCashout == at) {
+        return;
+    };
+
+    if(autoCashoutTimer != null) {
+        resetAutoCashout();
+    }
+
+	if(currentGameBeta < megaGameBeta && at >= maxTimeout) {
+		currentAutoCashout = maxTimeout;
+	} else if (at <= minTimeout) {
+		currentAutoCashout = minTimeout;
+	} else {
+		currentAutoCashout = at;
+	}
+	
+	*/
+	
+	currentAutoCashout = at;
+    autoCashoutTimer = setTimeout(onAutoCashoutTimer, ((Math.log(at/100)/0.00006) - (Date.now() - engine.getEngine().startTime)));
+};
+
+var resetAutoCashout = function() {
+    clearTimeout(autoCashoutTimer);
+    autoCashoutTimer = null;
+    currentAutoCashout = null;
+};
+
+var onAutoCashoutTimer = function() {
+    console.log("------onAutoCashout----");
+    engine.cashOut();
+    imCachedOut = true;
+    return;
+};
+
+///////////////////////////////////////
+//
+// Game Started
+//
+///////////////////////////////////////
+
+function formatBet(x) {
+	x = Math.round(x/100);
+    return x.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+
+function tabs(s, count) {
+	var t = count - Math.floor(s.length / 4); 
+	if(t < 0) t = 0;
+	
+	var r = "";
+	for(var i=0; i<t; i++) {
+		r = r + "\t";
+	}
+	return r;
+}
+
+engine.on('game_started', function(data) {
+    //console.log('Game Started', data);
+
+    currentGameData = data;
+	
+	console.log("----------------------");
+	console.log(" Missed Bet Estimates ");
+	console.log("----------------------");
+	console.log("Player" + tabs("Player",5) + "Estimate" + tabs("Estimate",3) + "Actual");
+	
+	for(var i=0; i<preGamePlayers.length; i++) {
+		var preGamePlayer = preGamePlayers[i];
+		if(!preGamePlayer) continue;
+		if(!currentGameData.hasOwnProperty(preGamePlayer.username)) continue;
+		var actualBet = currentGameData[preGamePlayer.username].bet;
+		var estimatedBet = preGamePlayer.adjMedianPlayerBet;
+		var p = actualBet/estimatedBet;
+		if(!isNaN(p) && (Math.abs(actualBet-estimatedBet) > 100000) && earlyBetters.hasOwnProperty(preGamePlayer.username)) {
+			console.log(preGamePlayer.username + tabs(preGamePlayer.username,5) + formatBet(estimatedBet) + tabs(formatBet(estimatedBet),3) + formatBet(actualBet) );
+		}
+	}
+	
+	for (var username in currentGameData) {
+        if (currentGameData.hasOwnProperty(username)) {
+			if(!earlyBetters.hasOwnProperty(username)) {
+				console.log(username + tabs(username,5) + "late" + tabs("late",3) + formatBet(currentGameData[username].bet));
+			}
+		}
+	}
+	
+	
+	
+	console.log("----------------------");
+
+	
+	setCurrentGameBeta();
+	
+    if(imPlaying) {
+        updateOutstandingBonus();
+       // console.log("Potential Bonus: " + Math.round((myPotentialBonus/currentGameBonus)*100) + "%");
+        //console.log("currentGameBeta", currentGameBeta);
+
+
+        if((myPotentialBonus/currentGameBonus) >= .95) {
+            bonusGameGrande = true;
+        }
+
+        setAutoCashout();
+		cacheBotsAndWhales();
+    }
+	
+
+
+	
+	/*
+	for(var i=0; i<currentLateComers.length; i++) {
+		var lateComer = currentLateComers[i];
+		if(!lateComers.hasOwnProperty(lateComer)) {
+			lateComers[lateComer] = [];
+		}
+			
+		lateComers[lateComer].unshift(currentGameBeta);
+		
+		if(lateComers[lateComer].length > 10) {
+			lateComers[lateComer].pop();
+		}
+	}
+	*/
+});
+
+///////////////////////////////////////
+//
+// Game Crash
+//
+///////////////////////////////////////
+
+engine.on('game_crash', function(data) {
+	//console.log("currentLateComers", currentLateComers);
+		
+    resetAutoCashout();
+
+    //cnsole.log("Average Bonus: " + getAveragePlayerBonus(engine.getUsername()));
+    //console.log("Average Cashout: " + getAveragePlayerCashout(engine.getUsername()));
+
+    logBestCashout();
+    logGameData(onLogGameDataResult, onLogGameDataResult, data);
+
+    function onLogGameDataResult() {
+        //console.log("Game Data Logged!");
+        cacheStats(onCashStatsResult, onCashStatsResult);
+    }
+
+    function onCashStatsResult() {
+        
+        currentGameData = null;
+        currentGameId = null;
+    }
+});
+
+///////////////////////////////////////
+//
+// Player Bet
+//
+///////////////////////////////////////
+
+
+var preGamePlayers = [];
+var earlyBetters = {};
+//var estimatedOptimalCashout;
+
+
+//var currentLateComers;
+var lateComers = {};
+
+var sortPregamePlayers = function(a, b) {
+		return parseFloat(b.medianPlayerCashout) - parseFloat(a.medianPlayerCashout);
+};
+
+engine.on('player_bet', function(data)
+{
+	var username = data.username;
+	
+	var medianPlayerBet = getMedianPlayerBet(username, 10, .50);
+	var percentile85 = getMedianPlayerBet(username, 100, .90);
+	var percentile15 = getMedianPlayerBet(username, 100, .10);
+
+	preGamePlayers.splice(data.index, 0, {username: username, medianPlayerBet: medianPlayerBet, percentile85: percentile85, percentile15: percentile15, adjMedianPlayerBet: medianPlayerBet});
+	
+	//if(imPlaying && data.username != engine.getUsername()) {
+	//	currentLateComers.push(data.username);
+	//}
+});
+
+var estimatedLargestBetter;
+
+
+
+function compareNumbers(a, b) {
+  return a - b;
+}
+
+var currentTimeout;
+
+var addPlayerBetToEstimte = function(preGramePlayer) {
+
+    if(preGramePlayer.adjMedianPlayerBet > estimatedLargestBet) {
+		estimatedLargestBetter = preGramePlayer.username;
+		estimatedLargestBet = preGramePlayer.adjMedianPlayerBet;
+	}
+	
+	estimatedGameValue += preGramePlayer.adjMedianPlayerBet;
+    estimatedGameBeta = (estimatedGameValue/100) / estimatedLargestBet;
+    estimatedPotentialBonus = currentBet * estimatedGameBeta;
+	
+	var estimatedGameBonus = estimatedGameValue / 100;
+}
+
+// -5 -4 -3 -2 -1 0 +1 +2 +3 +4 +5
+
+var playerListNeighborCount = 3;
+
+var adjustPreGamePlayers = function() {
+		
+	for(var i=preGamePlayers.length-1; i>=0; i--) {
+		var preGramePlayer = preGamePlayers[i];
+		
+		earlyBetters[preGramePlayer.username] = preGramePlayer;
+		
+		if(preGramePlayer.username == 'MartinG') continue;
+		
+		var ca = 0, ta = 0;
+		for(var j=i+1; j<i+playerListNeighborCount+1; j++) {
+			if(j>=preGamePlayers.length) break;
+			if(!preGamePlayers[j] || !preGamePlayers[j].hasOwnProperty('percentile15')) continue;
+			ta += preGamePlayers[j].percentile15;
+			ca ++;
+		}
+		
+		var underMedianBet = ca >= 1 ? ta/ca : 0;
+		
+		ca = 0, ta = 0;
+		for(var j=i-1; j>i-playerListNeighborCount-1; j--) {
+			if(j<0) break;
+			if(!preGamePlayers[j] || !preGamePlayers[j].hasOwnProperty('percentile85')) continue;
+			ta += preGamePlayers[j].percentile85;
+			ca ++;
+		}
+		
+		var overMedianBet = ca >= 1 ? ta/ca : 0;
+		
+		if(underMedianBet == 0 && overMedianBet == 0) continue;
+		
+		if(underMedianBet == 0) { // && preGramePlayer.medianPlayerBet > overMedianBet) {
+
+			preGramePlayer.adjMedianPlayerBet = getMedianPlayerBetBetween(preGramePlayer.username, 30, .20, 0, overMedianBet);	
+			if(preGramePlayer.adjMedianPlayerBet == 0 || preGramePlayer.adjMedianPlayerBet > overMedianBet) preGramePlayer.adjMedianPlayerBet = overMedianBet;
+			if(i < 10) console.log("adjusting bet down", preGramePlayer.username, Math.round(preGramePlayer.medianPlayerBet/100), Math.round(preGramePlayer.adjMedianPlayerBet/100), Math.round(overMedianBet/100));
+			
+		} else if (overMedianBet == 0) { //&& preGramePlayer.medianPlayerBet < underMedianBet) {
+			
+			preGramePlayer.adjMedianPlayerBet = getMedianPlayerBetBetween(preGramePlayer.username, 30, .80, underMedianBet, 100000000);
+			if(preGramePlayer.adjMedianPlayerBet == 0 || preGramePlayer.adjMedianPlayerBet < underMedianBet) preGramePlayer.adjMedianPlayerBet = underMedianBet;
+			if(i < 10) console.log("adjusting bet up", preGramePlayer.username, Math.round(preGramePlayer.medianPlayerBet/100), Math.round(preGramePlayer.adjMedianPlayerBet/100), Math.round(underMedianBet/100));
+			
+		} else if (underMedianBet != 0 && overMedianBet != 0 && (preGramePlayer.medianPlayerBet > overMedianBet || preGramePlayer.medianPlayerBet < underMedianBet)) {
+		
+			preGramePlayer.adjMedianPlayerBet = getMedianPlayerBetBetween(preGramePlayer.username, 30, .50, underMedianBet, overMedianBet);
+			if(preGramePlayer.adjMedianPlayerBet == 0) preGramePlayer.adjMedianPlayerBet = (underMedianBet + overMedianBet) / 2;
+			if(i < 10) console.log("adjusting bet between", preGramePlayer.username, Math.round(preGramePlayer.medianPlayerBet/100), Math.round(preGramePlayer.adjMedianPlayerBet/100), Math.round(underMedianBet/100), Math.round(overMedianBet/100));
+			
+		} else {
+			
+			if(i < 10) console.log("not adjusting", preGramePlayer.username, Math.round(preGramePlayer.medianPlayerBet/100));
+		}
+	}	
+}
+
+var addEarlyBetters = function() {
+		for(var i=preGamePlayers.length-1; i>=0; i--) {
+			var preGramePlayer = preGamePlayers[i];
+			earlyBetters[preGramePlayer.username] = preGramePlayer;
+		}
+}
+
+var calcBet = function()
+{
+	var myPregamePlayer = {username: 'MartinG', medianPlayerBet: bet, adjMedianPlayerBet: bet};
+	
+	for(var i=0; i<preGamePlayers.length; i++) {
+		if(preGamePlayers[i].medianPlayerBet < myPregamePlayer.medianPlayerBet) {
+			preGamePlayers.splice(i, 0, myPregamePlayer);
+			break;
+		}
+	}
+	
+	addEarlyBetters();
+	//adjustPreGamePlayers();
+		
+	for(var i=0; i<preGamePlayers.length; i++) {
+		var preGramePlayer = preGamePlayers[i];
+		addPlayerBetToEstimte(preGramePlayer);
+	}
+	
+	///////
+	//var seltzMedian = getMedianPlayerBet('seltz', 10, .6);
+	//addPlayerBetToEstimte({username: 'seltz', medianPlayerBet: seltzMedian, adjMedianPlayerBet: seltzMedian});
+	///////////
+	
+	if(estimatedGameBeta < minGameBeta) {
+       
+	   //console.log("Estimated Game Beta Too Small");
+       
+	} else {
+
+		currentBet = (estimatedLargestBet/2 > bet ? bet : estimatedLargestBet/2);
+		currentTimeout = maxTimeout;
+		currentAutoCashout = currentTimeout;
+		currentBet = Math.round(currentBet/100) * 100;
+
+		if(realBets && engine.getEngine().gameState == 'STARTING') engine.placeBet(currentBet, currentTimeout);
+		
+		imPlaying = true;
+	
+		//console.log("currentBet", currentBet);
+		//console.log("currentTimeout", currentTimeout);
+	
+		//console.log(engine.getEngine().gameState);
+	}
+
+	//console.log("estimatedGameValue", Math.round(estimatedGameValue/100));
+    //console.log("estimatedGameBeta", Math.round(estimatedGameBeta*10000)/100);
+	
+	//console.log("******* estimatedLargestBetter: " + estimatedLargestBetter);
+	//console.log("******* estimatedLargestBet: " + estimatedLargestBet);
+}
+
+///////////////////////////////////////
+//
+// Cashed Out
+//
+///////////////////////////////////////
+
+engine.on('cashed_out', function(resp) {
+    //console.log(resp);
+    updateOutstandingBonus();
+
+    //console.log(resp.stopped_at);
+    if(imPlaying && !imCachedOut) {
+
+	
+        if((outstandingBonus + myPotentialBonus) <= currentGameBonus) {
+            //console.log("My Bonus Is Optimized");
+            engine.cashOut();
+            imCachedOut = true;
+            return;
+        }
+
+        //console.log(outstandingBonus + " " + currentGameBonus);
+
+	
+        if (resp.stopped_at >= midTimeout && outstandingBonus < currentGameBonus) {
+            //console.log("My Bonus Is Partially Optimized");
+			engine.cashOut();
+            imCachedOut = true;
+            return;
+        }
+		
+
+		/*
+        if((resp.stopped_at >= autoTimeOut) && (outstandingBonus < currentGameBonus)) {
+            engine.cashOut();
+            imCachedOut = true;
+            return;
+        }
+		*/
+    }
+});
+
+engine.on('disconnect', function() {
+    console.log('Client disconnected');
+
+});
+
+//Getters:
+//console.log('Balance: ' + engine.getBalance());
+//console.log('The current payout is: ' + engine.getCurrentPayout());
+//console.log('My username is: ', engine.getUsername());
+//console.log('The max current bet is: ', engine.getMaxBet()/100, ' Bits');
+//console.log('The current maxWin is: ', engine.getMaxWin()/100, ' Bits');
+// engine.getEngine() for raw engine
+
+
+//Helpers:
+//console.log('Was the last game played? ', engine.lastGamePlayed()?'Yes':'No');
+//console.log('Last game status: ', engine.lastGamePlay());
+
+
+
+var db;
+var databaseName = "game_logs_4";
+var objectStoreName = "bets";
+
+
+var bestCashouts = [];
+var bestCashoutsSorted = [];
+
+
+var getBestCashoutAtQuantile = function(q) {
+    if(bestCashoutsSorted.length == 0) return 100;
+    return bestCashoutsSorted[Math.floor(bestCashoutsSorted.length*q)];
+};
+
+var logBestCashout = function() {
+    var bestCashout = getBestBonusCashout();
+    if(isNaN(bestCashout)) return;
+    bestCashouts.unshift(bestCashout);
+    bestCashouts.splice(bestCashoutCacheLength, bestCashouts.length - bestCashoutCacheLength);
+
+    bestCashoutsSorted = bestCashouts.slice(0);
+    bestCashoutsSorted.sort(sortFloat);
+
+    //console.log(bestCashoutsSorted);
+
+
+};
+
+var getBestBonusCashout = function() {
+    var gameDataArray = [];
+
+    for (var username in currentGameData) {
+        if (currentGameData.hasOwnProperty(username)) {
+            gameDataArray.push(currentGameData[username]);
+        }
+    }
+
+    gameDataArray.sort(sort_by('stopped_at', false, parseInt));
+
+    //console.log(gameDataArray);
+
+    var best;
+
+    for(var i=0; i<gameDataArray.length; i++) {
+        var pb = gameDataArray[i].bet * currentGameBeta;
+
+        if(pb <= (gameDataArray[i].bonus*1.05)) {
+            best = gameDataArray[i];
+            break;
+        }
+    }
+
+    if(!best || !best.stopped_at) return NaN;
+
+    return best.stopped_at;
+};
+
+var logGameData = function(onResult, onError, data) {
+    var crash = data.game_crash;
+
+    var entry;
+    var playerGameData;
+    var bet;
+    var bonus;
+    var cashout;
+
+    var entries = [];
+
+    if (db == null || currentGameData == null || currentGameId == null) {
+        onError();
+        return;
+    }
+
+    for (var username in currentGameData) {
+        if (currentGameData.hasOwnProperty(username)) {
+            playerGameData = currentGameData[username];
+
+            bet = playerGameData.bet;
+            bonus = isNaN(data.bonuses[username]) ? 0 : data.bonuses[username];
+            cashout = playerGameData.stopped_at;
+
+            entry = {};
+
+            entry[USERNAME] = playerGameData.username.toLowerCase();
+            entry[GAME_ID] = currentGameId;
+            entry[CRASH] = crash;
+            entry[BET] = bet;
+            entry[BONUS] = bonus;
+
+            if (!isNaN(cashout)) {
+                entry[CASHOUT] = cashout;
+            }
+
+            entries.push(entry);
+        }
+    }
+
+    addRecordsToDatabase(onResult, onError, entries);
+};
+
+var databaseOpened = false;
+
+var openDatabase = function(onResult, onError) {
+    var request = indexedDB.open(databaseName);
+
+    request.onerror = function(event) {
+        console.log("Database Didn't Open");
+        if(onError) onError();
+    };
+
+    request.onupgradeneeded = function(event) {
+        var db = event.target.result;
+
+        var objectStore = db.createObjectStore(objectStoreName, { keyPath: [USERNAME, GAME_ID] });
+        //objectStore.createIndex("gameId_username", ['gameId', 'username'], {unique: false});
+
+        console.log("New Database Created");
+    };
+
+    request.onsuccess = function(event) {
+        db = event.target.result;
+        db.onerror = function(event) {
+            console.log("Database error: " + event.target.errorCode);
+        };
+
+        //console.log("Database Opened");
+		databaseOpened = true;
+        if(onResult) onResult();
+    };
+};
+
+var addRecordsToDatabase = function(onResult, onError, records) {
+	if(!databaseOpened) return;
+	
+    if(!records || records.length == 0) return;
+
+    var transaction = db.transaction([objectStoreName], "readwrite");
+
+    transaction.oncomplete = function(event) {
+        // console.log("Records Added To Database");
+        if(onResult) onResult();
+    };
+
+    transaction.onerror = function(event) {
+        console.log("Error While Added Record To Databases");
+        if(onError) onError();
+    };
+
+    var objectStore = transaction.objectStore(objectStoreName);
+
+    for (var i in records) {
+        var request = objectStore.add(records[i]);
+    }
+};
+
+var getRecords = function(onResult, onError, username, count) {
+	if(!databaseOpened) return;
+	
+    username = username.toLowerCase();
+
+    var result = [];
+
+    var keyRange = IDBKeyRange.upperBound( [username, ''], true );
+    var transaction = db.transaction(objectStoreName);
+
+    transaction.oncomplete = function(event) {
+        if(onResult) onResult(result);
+    };
+
+    transaction.onerror = function(event) {
+        console.log("error " + username  + " " + count);
+        if(onError) onError();
+    };
+
+    var objectStore = transaction.objectStore(objectStoreName);
+
+    var i = 0;
+
+    objectStore.openCursor(keyRange, "prev").onsuccess = function(event) {
+        var cursor = event.target.result;
+        if (cursor) {
+            if(cursor.value[USERNAME] != username) {
+                return;
+            }
+
+            //console.log(cursor.value[GAME_ID]);
+            result.push(cursor.value);
+
+            i++;
+            if(i < count) {
+                cursor.continue();
+            }
+        }
+    };
+};
+
+///////////////////////////////////////
+//
+// On Message
+//
+///////////////////////////////////////
+
+engine.on('msg', function(resp) {
+    if(!enableChatBot) return;
+    if(!resp.message) return;
+	if(resp.channelName !== 'spam') return;
+	
+    var message = resp.message;
+    var username = resp.username;
+    var queryUser;
+    var queryCount;
+
+	if(engine.getUsername() != username) return;
+	
+    //if(message.indexOf('@Lucky8s') > -1) {
+    var query = /^\s*\!stats\s*\@?([^\s]+)\s*(\d*)/.exec(message);
+	var cashoutsQuery = /^\s*\!cashouts\s*\@?([^\s]+)\s*(\d*)/.exec(message);
+ 
+    if(query && query.length == 3) {
+        queryUser = query[1];
+
+        if(queryUser == 'bonus_chasers') {
+            onGetBonusPlayers(getBestBonusPlayerFromStats());
+        } else {
+            queryCount = parseInt(query[2]);
+            if(isNaN(queryCount) || queryCount < 1 || queryCount > 100000) {
+                queryCount = 100;
+            }
+            getPlayerStatsFromDB(onGetPlayerStatsResult, onGetStatsError, queryUser, queryCount);
+        }
+    } else if (cashoutsQuery && cashoutsQuery.length == 3){
+		queryUser = cashoutsQuery[1];
+		queryCount = parseInt(cashoutsQuery[2]);
+		if(isNaN(queryCount) || queryCount < 1) {
+			queryCount = 10;
+        }
+		printCashouts(queryUser, queryCount);
+	}
+    //}
+
+    function onGetBonusPlayers(result) {
+        if(!result || result.length == 0) return;
+
+        var s = "The top bonus chasers are ";
+
+        for(var i=0; i<result.length && i<5; i++) {
+            s += (result[i].playerName + ' ' + (Math.round(result[i].averageBonus*10000)/100) + '%');
+            if(i < (result.length - 1) && i < (5 - 1)) {
+                s += ', ';
+            }
+        }
+
+        s += " for their last 50 games.";
+
+        engine.chat(s);
+    }
+
+    function onGetPlayerStatsResult(result) {
+        engine.chat("Average "  + result.averageBet + " bits bet, " + result.averageBonus + "% bonus " + (isNaN(result.averageCashout) ? "" : (" and " + result.averageCashout + "x cashout")) + " over " + result.games + " games");
+    }
+
+    function onGetStatsError() {
+        engine.chat("I don't know.");
+    }
+});
+
+var printCashouts = function(playerName, count) {
+        getRecords(onGetRecordsResult, onGetRecordsError, playerName, count);
+
+        function onGetRecordsResult(result) {
+			var s = playerName + ": ";
+			for(i=0; i<result.length; i++) {
+				if(i > 0) {
+					s += ", ";
+				}
+				
+				/*var USERNAME = 'u';
+					var GAME_ID = 'g';
+					var BET = 'b';
+					var CRASH = 'h';
+					var BONUS = 's';
+					var CASHOUT = 't';
+					*/
+				//s += (result[i][BET]/100);
+					
+				if (!isNaN(result[i][CASHOUT])) {
+					s += ("+" + (result[i][CASHOUT]/100));
+				} else {
+					s += ("-" + (result[i][CRASH]/100));
+				}
+				
+				//s += "x";
+			}
+			
+			if(count <= 50) {
+				engine.chat(s);
+			} else {
+				engine.chat(";-)");
+				console.log(s);
+			}
+			 
+			 
+        }
+
+        function onGetRecordsError() {
+            engine.chat("Can't do that.");
+        }
+}
+
+var getPlayerStatsFromDB = function(onResult, onError, username, count) {
+
+    getRecords(onGetRecordsResult, onError, username, count);
+
+    function onGetRecordsResult(result) {
+
+        if(!result || result.length == 0) {
+            onError();
+            return;
+        }
+
+        var averageCashout = _getAveragePlayerCashout(result);
+        var averageBonus = _getAveragePlayerBonus(result);
+        var averageBet = _getAveragePlayerBet(result);
+
+        onResult({
+            games: result.length,
+            averageBonus:  Math.round(averageBonus*10000)/100,
+            averageCashout: Math.round(averageCashout)/100,
+            averageBet: Math.round(averageBet/100)
+        });
+    }
+};
+
+var getBestBonusPlayerFromStats = function() {
+    var d = [];
+
+    if(isNaN(parseInt(currentGameId)) || !stats || stats.length == 0) return d;
+
+    for (var playerName in stats) {
+        if (stats.hasOwnProperty(playerName)) {
+
+            if(stats[playerName] && (stats[playerName].length > 49) && (stats[playerName][0][GAME_ID] > (currentGameId - 10))) {
+                d.push({
+                    playerName: playerName,
+                    averageBonus: _getAveragePlayerBonus(stats[playerName])
+                });
+            }
+        }
+    }
+
+    d.sort(sort_by('averageBonus', true, parseFloat));
+
+    return d;
+}
+
+var sort_by = function(field, reverse, primer){
+
+    var key = primer ?
+        function(x) {return primer(x[field])} :
+        function(x) {return x[field]};
+
+    reverse = !reverse ? 1 : -1;
+
+    return function (a, b) {
+        return a = key(a), b = key(b), reverse * ((a > b) - (b > a));
+    }
+};
+
+var sortFloat = function(a,b) {
+    return a - b;
+};
+
+var getMultiplierForProbability = function(p) {
+	return (1/p)*(99/101) + (1/100);
+}
+
+var blobURL = URL.createObjectURL( new Blob([ '(',
+
+        function(){
+            var fakeIdToId = {};
+            onmessage = function (event) {
+                var data = event.data,
+                    name = data.name,
+                    fakeId = data.fakeId,
+                    time;
+                if(data.hasOwnProperty('time')) {
+                    time = data.time;
+                }
+                switch (name) {
+                    case 'setInterval':
+                        fakeIdToId[fakeId] = setInterval(function () {
+                            postMessage({fakeId: fakeId});
+                        }, time);
+                        break;
+                    case 'clearInterval':
+                        if (fakeIdToId.hasOwnProperty (fakeId)) {
+                            clearInterval(fakeIdToId[fakeId]);
+                            delete fakeIdToId[fakeId];
+                        }
+                        break;
+                    case 'setTimeout':
+                        fakeIdToId[fakeId] = setTimeout(function () {
+                            postMessage({fakeId: fakeId});
+                            if (fakeIdToId.hasOwnProperty (fakeId)) {
+                                delete fakeIdToId[fakeId];
+                            }
+                        }, time);
+                        break;
+                    case 'clearTimeout':
+                        if (fakeIdToId.hasOwnProperty (fakeId)) {
+                            clearTimeout(fakeIdToId[fakeId]);
+                            delete fakeIdToId[fakeId];
+                        }
+                        break;
+                }
+            }
+        }.toString(),
+
+        ')()' ], { type: 'application/javascript' } ) );
+
+
+(function (workerScript) {
+    var worker,
+        fakeIdToCallback = {},
+        lastFakeId = 0,
+        logPrefix = 'HackTimer.js by turuslan: ';
+    if (typeof (Worker) !== 'undefined') {
+        function getFakeId () {
+            lastFakeId ++;
+            return lastFakeId;
+        }
+        try {
+            worker = new Worker (workerScript);
+            window.setInterval = function (callback, time /* , parameters */) {
+                var fakeId = getFakeId ();
+                fakeIdToCallback[fakeId] = {
+                    callback: callback,
+                    parameters: Array.prototype.slice.call(arguments, 2)
+                };
+                worker.postMessage ({
+                    name: 'setInterval',
+                    fakeId: fakeId,
+                    time: time
+                });
+                return fakeId;
+            };
+            window.clearInterval = function (fakeId) {
+                if (fakeIdToCallback.hasOwnProperty(fakeId)) {
+                    delete fakeIdToCallback[fakeId];
+                    worker.postMessage ({
+                        name: 'clearInterval',
+                        fakeId: fakeId
+                    });
+                }
+            };
+            window.setTimeout = function (callback, time /* , parameters */) {
+                var fakeId = getFakeId ();
+                fakeIdToCallback[fakeId] = {
+                    callback: callback,
+                    parameters: Array.prototype.slice.call(arguments, 2)
+                };
+                worker.postMessage ({
+                    name: 'setTimeout',
+                    fakeId: fakeId,
+                    time: time
+                });
+                return fakeId;
+            };
+            window.clearTimeout = function (fakeId) {
+                if (fakeIdToCallback.hasOwnProperty(fakeId)) {
+                    delete fakeIdToCallback[fakeId];
+                    worker.postMessage ({
+                        name: 'clearTimeout',
+                        fakeId: fakeId
+                    });
+                }
+            };
+            worker.onmessage = function (event) {
+                var data = event.data,
+                    fakeId = data.fakeId,
+                    request,
+                    parameters,
+                    callback;
+                if (fakeIdToCallback.hasOwnProperty(fakeId)) {
+                    request = fakeIdToCallback[fakeId];
+                    callback = request.callback;
+                    parameters = request.parameters;
+                }
+                if (typeof (callback) === 'string') {
+                    try {
+                        callback = new Function (callback);
+                    } catch (error) {
+                        console.log (logPrefix + 'Error parsing callback code string: ', error);
+                    }
+                }
+                if (typeof (callback) === 'function') {
+                    callback.apply (window, parameters);
+                }
+            };
+            worker.onerror = function (event) {
+                console.log (event);
+            };
+            console.log (logPrefix + 'Initialisation succeeded');
+        } catch (error) {
+            console.log (logPrefix + 'Initialisation failed');
+            console.error (error);
+        }
+    } else {
+        console.log (logPrefix + 'Initialisation failed - HTML5 Web Worker is not supported');
+    }
+})(blobURL);

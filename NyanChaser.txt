@@ -1,0 +1,189 @@
+/** 
+*      Poweredges's Nyan Chaser v2 
+*      Author:  poweredge (elitecrash)
+*      Created: Jan 3, 2019
+*
+*  Disclaimer: Depending on your chosen settings, it is possible to lose
+*              your bankroll.  Keep an eye on this script until you know
+*              your settings are stable. Minimum bankroll is 10k
+**/
+
+
+
+// --------Editable Settings ---------- //
+
+// Setting for nyan multiplier: 1000 
+var targetMultiplier = 1000;
+
+//How many rounds until recoupe attempt (no more than 99)...
+// the larger this number, the larger the recoupe bet is
+var roundsBetweenAttempts = 20
+
+// Quit after catching nyan?
+var stopChasingAfterCatch = false;
+
+// Max bet allowed;
+var maximumBet = 2000000;
+
+
+
+
+//----------------------- Do not touch below this line unless you know how to code! --------------------------------------//
+
+// Variables
+var bankroll = engine.getBalance();
+var previousbankroll = engine.getBalance();
+var basebet = GetDynamicBaseBet(bankroll);
+var currentBet = basebet;
+var currentGameID = -1;
+var currentMultiplier = targetMultiplier;
+var firstGame = true;
+var lossBet = 0;
+var lossCount = 0;
+var maxbet = GetDynamicBaseBet(maximumBet * 100);
+var recoupeCounter = 0;
+var spentChasing = 0;
+
+
+// Let's begin
+Initialize();
+
+// On a round starting....
+engine.on('game_starting', function(info) 
+{
+  //Log
+  LogNewGame(info);
+
+  //Configure Bet Based on BR
+  if(recoupeCounter >= roundsBetweenAttempts)
+  {
+    RecoverBR();
+  }
+  else
+  {
+    Chase();
+  }
+
+  //Place Bet
+  PlaceBet();
+
+});
+
+// On player cashing out
+engine.on('cashed_out', function(data) 
+{
+  if (data.username == engine.getUsername()) 
+  { 
+    LogSuccess(data);
+  }
+});
+
+// On round ending
+engine.on('game_crash', function(data) 
+{
+  if (!firstGame) 
+  { 
+    console.log('Game ended at ' + (data.game_crash / 100) + 'x'); 
+    bankroll = engine.getBalance();
+  }
+});
+
+
+//------ Helper functions ------//
+
+function GetDynamicBaseBet(budget)
+{ 
+    return Math.floor((budget / 100 ) / 10000) * 100;
+}
+
+function Initialize()
+{
+  console.log('====== Poweredges Nyan Chaser ======');
+  console.log('My username is: ' + engine.getUsername());
+  console.log('Starting balance: ' + (engine.getBalance() / 100).toFixed(2) + ' satoshi');
+  var startingBalance = engine.getBalance();
+}
+
+function LogNewGame(info)
+{
+  console.log('====== New Game ======');
+  console.log('Game #' + info.game_id);
+  currentGameID = info.game_id;
+  
+  if (!firstGame) 
+  { 
+    // Display data only after first game played.
+    console.log('Spent Chasing: ' + (spentChasing / 100).toFixed(2) + ' satoshi');
+    console.log('Recoupe Limit =  ' + (recoupeCounter / 100).toFixed(2) + ' satoshi');
+  }
+}
+
+function LogSuccess(data)
+{
+  console.log('You won this round!');
+
+  bankroll = engine.getBalance();
+  basebet = GetDynamicBaseBet(bankroll);
+  currentBet = basebet;
+
+  if(data.stopped_at >= (targetMultiplier * 100))
+  {
+    console.log('Successfully hit target multiplier!');
+    recoupeCounter = 0;
+    if(stopChasingAfterCatch)
+    {
+      console.log('Stopping script...');
+      engine.stop();
+      document.title = `Stopped`;
+    }
+  }
+}
+
+function RecoverBR()
+{
+  document.title = `Recovering Bankroll`;
+  currentBet = basebet * roundsBetweenAttempts * 100 ; 
+  currentMultiplier = 1.01; 
+  recoupeCounter = 0;
+}
+
+function PlaceBet()
+{
+  // Message and set first game to false to be sure.
+  console.log('Betting ' + (currentBet / 100) + ' satoshi, cashing out at ' + currentMultiplier + 'x');
+  firstGame = false;
+  recoupeCounter++;
+
+  if (currentBet <= bankroll) //safety net to not wager more than balance
+    {   
+      engine.placeBet(currentBet, Math.floor(currentMultiplier * 100), false);
+      spentChasing += currentBet;
+      previousbankroll = engine.getBalance();
+    }  
+}
+
+function Chase()
+{
+  if (engine.lastGamePlay() == 'WON')
+  {
+    basebet = GetDynamicBaseBet(bankroll);
+    recoupeCounter = 0;
+  }
+
+  //chase nyan 
+  document.title = `Chasing: ${targetMultiplier}x`;        
+  currentMultiplier = targetMultiplier;
+  bankroll = engine.getBalance()/100;
+  if(basebet >= maxbet)
+  {
+    currentBet = maxbet;
+  }
+  else
+  {
+    currentBet = basebet;
+  }
+}
+
+
+
+    

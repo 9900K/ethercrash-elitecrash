@@ -1,0 +1,75 @@
+//----------------------------------
+
+var targetProfit = 1000;
+
+var cashOut = 1000;
+
+var pauseStreak = 500;
+
+//----------------------------------
+
+var currentBet = targetProfit / cashOut;
+
+var skip = 0;
+
+var startBR = engine.getBalance();
+var currentBR = startBR;
+var sessionBR = startBR;
+
+var losses = 0;
+var lostCount = 0;
+
+//----------------------------------
+
+engine.on('game_starting', function(info) {
+
+currentBR = engine.getBalance();
+
+	if (currentBet && engine.lastGamePlay() == 'LOST') {
+	
+		lostCount++;
+		losses = (startBR-currentBR)/100;
+		
+		currentBet = (losses + targetProfit) / cashOut;
+		console.log('Break-even cashOut =', Math.round(((startBR-currentBR)/100)/currentBet));
+	}
+	else{
+	
+		if (currentBR >= startBR) {
+		
+			currentBet = targetProfit / cashOut;
+			lostCount = 0;
+			startBR = currentBR;
+		}	
+	}
+	
+	if (skip >= pauseStreak) {
+	
+		engine.placeBet(Math.round(currentBet)*100, Math.round(cashOut*100));
+		console.log('Placing bet of', Math.round(currentBet), 'at', Math.round(cashOut*100)/100+"x");
+		//console.log('Potential profit =', Math.round(((currentBet*(cashOut-1))-((startBR-currentBR)/100))*100)/100);	
+	}
+	else{
+	
+		console.log('skipping',skip,'of', pauseStreak,'games.');
+	}
+});
+
+engine.on('game_crash', function( data ) {	
+
+	if (data.game_crash/100 < cashOut) {
+	
+		skip++;
+	}
+	else{
+	
+		skip = 0;
+	}
+	
+	currentBR = engine.getBalance();
+	
+	console.log('Game crashed at', data.game_crash/100);	
+	console.log('Current losses/profit =', (currentBR-startBR)/100);
+	console.log('This session profit =', (currentBR-sessionBR)/100);
+	console.log('---------------------------');
+});
